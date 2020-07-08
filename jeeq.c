@@ -102,7 +102,7 @@ static int YfromX(BIGNUM *y, size_t *offset, BIGNUM *x, bool odd)
     BIGNUM *My = BN_new();
     BIGNUM *My2 = BN_new();
 
-    BIGNUM *tmp = BN_new();
+    BIGNUM *ax2 = BN_new();
     BIGNUM *half = BN_dup(p); // by putting a bignum into the special half power we get a square root
     BN_add_word(half, 1); 
     BN_div_word(half, 4);
@@ -113,14 +113,13 @@ static int YfromX(BIGNUM *y, size_t *offset, BIGNUM *x, bool odd)
     {
         // redo algorithm
         BN_add(Mx, x, bn_i);   
-        BN_mod_mul(My2, Mx, Mx, p, ctx);
-        BN_mod_mul(My2, My2, Mx, p, ctx);
+        BN_sqr(My2, Mx, ctx);
         BN_mod_mul(My2, My2, Mx, p, ctx);
 
-        BN_mod_sqr(tmp, Mx, tmp, ctx);
-        BN_mul(tmp, tmp, a, ctx);
+        BN_sqr(ax2, Mx, ctx);
+        BN_mod_mul(ax2, ax2, a, p, ctx);
         BN_mod(b, b, p, ctx);
-        BN_add(My2, My2, tmp);
+        BN_add(My2, My2, ax2);
         BN_add(My2, My2, b);
 
         BN_mod_exp(My, My2, half, p, ctx);
@@ -144,7 +143,6 @@ static int YfromX(BIGNUM *y, size_t *offset, BIGNUM *x, bool odd)
         BN_add_word(bn_i, 1);
     }
 
-    assert("no y found");
     return -1;
 }
 
