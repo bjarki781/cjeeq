@@ -1,5 +1,5 @@
 /*
-   Built on jeeq.py by jjack??? (link). GPLv3
+   Based on https://github.com/jackjack-jj/jeeq, GPLv3.
    Specifically designed to use Smileycoin key pairs for encoding/decoding so
    this is not as general as jeeq.py.
 
