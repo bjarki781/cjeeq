@@ -25,9 +25,7 @@
 static BIO *out;
 static EC_GROUP *group;
 static BN_CTX *ctx;
-static EC_POINT *generator;
 static BIGNUM *order;
-static BIGNUM *cofactor;
 
 #define PRIVATE_HEADER_LEN      9
 #define PUBLIC_HEADER_LEN       7
@@ -36,10 +34,10 @@ static BIGNUM *cofactor;
 #define UNCOMPR_PUBLIC_KEY_LEN  65
 #define CHUNK_SIZE              32
 #define VERSION                 0
-#define ORDER_HEX               "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
-#define MAX_256BIT_HEX          "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" 
 #define GX_HEX                  "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"
-#define GY_HEX                  "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+#define GY_HEX                  "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8"
+#define GCOFACTOR_HEX           "01"
+#define GORDER_HEX              "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
 
 int printn(uint8_t *str, int n)
 {
@@ -48,8 +46,53 @@ int printn(uint8_t *str, int n)
     puts("");
 }
 
+int init()
+{
+    BIGNUM *cofactor;
+//    BIGNUM *order;
+    EC_POINT *generator;
+
+    ctx = BN_CTX_new();
+    group = EC_GROUP_new_by_curve_name(NID_secp256k1);
+
+    int rc = RAND_load_file("/dev/random", 32);
+    assert(rc == 32);
+
+    generator = EC_POINT_new(group);
+    order = BN_new();
+    cofactor = BN_new();
+
+    BN_hex2bn(&order, GORDER_HEX);
+    BN_hex2bn(&cofactor, GCOFACTOR_HEX);
+
+    BIGNUM *Gx = BN_new();
+    BIGNUM *Gy = BN_new();
+
+    BN_hex2bn(&Gx, GX_HEX);
+    BN_hex2bn(&Gy, GY_HEX);
+
+    EC_POINT_set_affine_coordinates_GFp(group, generator, Gx, Gy, ctx);
+    EC_GROUP_set_generator(group, generator, order, cofactor);
+
+    BN_free(Gx);
+    BN_free(Gy);
+    BN_free(order);
+    BN_free(cofactor);
+    
+    return 1;
+}
+
+int cleanup()
+{
+    BN_CTX_free(ctx);
+    EC_GROUP_free(group);
+    RAND_cleanup();
+
+    return 1;
+}
+
 // return private header on the form [version,1][length of checksum,2][checksum,6]
-static uint8_t *write_private_header(uint8_t *ret, uint8_t *nmsg, uint32_t msg_length)
+    static uint8_t *write_private_header(uint8_t *ret, uint8_t *nmsg, uint32_t msg_length)
 {
     uint8_t hash[SHA256_DIGEST_LENGTH];
     SHA256(nmsg, msg_length, hash);
@@ -94,7 +137,7 @@ static uint32_t read_private_header(uint8_t *str, BIGNUM* bn_prvkey, uint16_t pu
     uint16_t msg_hash = *(uint16_t*)&str[7];
 
     EC_POINT *pubkey_point = EC_POINT_new(group);
-    EC_POINT_mul(group, pubkey_point, NULL, generator, bn_prvkey, ctx);
+    EC_POINT_mul(group, pubkey_point, bn_prvkey, NULL, NULL, ctx);
 
     uint8_t *pubkey_compressed = OPENSSL_malloc(COMPR_PUBLIC_KEY_LEN);
     EC_POINT_point2oct(group, pubkey_point, POINT_CONVERSION_COMPRESSED, pubkey_compressed, COMPR_PUBLIC_KEY_LEN, ctx);
@@ -105,11 +148,11 @@ static uint32_t read_private_header(uint8_t *str, BIGNUM* bn_prvkey, uint16_t pu
     uint8_t comppub_hash[SHA256_DIGEST_LENGTH];
     SHA256(pubkey_compressed, COMPR_PUBLIC_KEY_LEN, comppub_hash);
     uint16_t comppub_checksum = *((uint16_t*)comppub_hash);
-    
+
     uint8_t uncomppub_hash[SHA256_DIGEST_LENGTH];
     SHA256(pubkey_uncompressed, UNCOMPR_PUBLIC_KEY_LEN, uncomppub_hash);
     uint16_t uncomppub_checksum = *((uint16_t*)uncomppub_hash);
-    
+
     assert(uncomppub_checksum == pubkey_checksum || comppub_checksum == pubkey_checksum);
 
     OPENSSL_free(pubkey_compressed);
@@ -129,46 +172,7 @@ static uint16_t read_public_header(uint8_t *enc)
     return *(uint16_t*)&enc[5];
 }
 
-int init()
-{
-    ctx = BN_CTX_new();
-    group = EC_GROUP_new_by_curve_name(NID_secp256k1);
-
-    generator = EC_POINT_new(group);
-    order = BN_new();
-    cofactor = BN_new();
-
-    BN_hex2bn(&order, ORDER_HEX);
-    BN_hex2bn(&cofactor, MAX_256BIT_HEX);
-    BN_div(cofactor, NULL, cofactor, order, ctx);
-
-    BIGNUM *Gx = BN_new();
-    BIGNUM *Gy = BN_new();
-
-    BN_hex2bn(&Gx, GX_HEX);
-    BN_hex2bn(&Gy, GY_HEX);
-
-    RAND_seed("a string that is not random", 10);
-
-    EC_POINT_set_affine_coordinates_GFp(group, generator, Gx, Gy, ctx);
-    EC_GROUP_set_generator(group, generator, order, cofactor);
-
-    BN_free(Gx);
-    BN_free(Gy);
-    
-    return 1;
-}
-
-int cleanup()
-{
-    EC_POINT_free(generator);
-    BN_free(order);
-    BN_free(cofactor);
-    BN_CTX_free(ctx);
-    EC_GROUP_free(group);
-}
-
-static int YfromX(BIGNUM *y, size_t *offset, BIGNUM *x, const bool odd)
+static int y_from_x(BIGNUM *y, size_t *offset, BIGNUM *x, const bool odd)
 {
     EC_POINT *M = EC_POINT_new(group);
 
@@ -226,7 +230,6 @@ static int YfromX(BIGNUM *y, size_t *offset, BIGNUM *x, const bool odd)
             } 
             else 
             {
-                assert(0);
                 BN_sub(y, p, My);
                 *offset = i;
             }
@@ -260,7 +263,7 @@ static int YfromX(BIGNUM *y, size_t *offset, BIGNUM *x, const bool odd)
 
 // enc needs to be of size PUBLIC_HEADER_LEN + 66*chunk_count
 // return how many bytes written
-size_t EncryptMessage(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t *msg, size_t msg_len)
+size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t *msg, size_t msg_len)
 {
     assert(pubkey_len == COMPR_PUBLIC_KEY_LEN || pubkey_len == UNCOMPR_PUBLIC_KEY_LEN);
     assert(pubkey[0] == '\x02' || pubkey[0] == '\x3' || pubkey[0] == '\x04');
@@ -314,11 +317,11 @@ size_t EncryptMessage(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t 
 
         // since rand must be in [1,...,q-1]
         BN_add_word(rand, 1);
-//        BN_set_word(rand, 4545984598);
+        //BN_mod(rand, rand, norder, ctx);
 
         BN_bin2bn(&m[i*CHUNK_SIZE], CHUNK_SIZE, Mx);
 
-        int ret = YfromX(My, &xoffset, Mx, true);
+        int ret = y_from_x(My, &xoffset, Mx, true);
         assert(ret != -1);
 
         BN_add_word(Mx, xoffset);
@@ -351,7 +354,7 @@ size_t EncryptMessage(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t 
 }
 
 // return how many bytes written
-size_t DecryptMessage(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_len)
+size_t decrypt_message(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_len)
 {
     BIGNUM *bn_prvkey = BN_new();
     BN_bin2bn(prvkey, PRIV_KEY_LEN, bn_prvkey);
@@ -371,6 +374,9 @@ size_t DecryptMessage(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_le
 
     BIGNUM *Mx = BN_new();
 
+    // assume that there is an subgroup order
+    //BN_mod(bn_prvkey, bn_prvkey, norder, ctx);
+
     int enc_loc = PUBLIC_HEADER_LEN;
     int r_loc = 0;
     for (int i = 0; i < chunk_count; i++)
@@ -381,6 +387,7 @@ size_t DecryptMessage(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_le
         Tser[0] = 2 + (xoffset&1);
         EC_POINT_oct2point(group, T, Tser, 33, ctx);
         EC_POINT_oct2point(group, U, User, 33, ctx);
+
         EC_POINT_mul(group, V, NULL, T, bn_prvkey, ctx);
         EC_POINT_invert(group, V, ctx);
         EC_POINT_add(group, M, U, V, ctx);
@@ -433,14 +440,14 @@ int main(int argc, char *argv[])
 
     init();
 
-    enc_len = EncryptMessage(enc, pub, strlen(pub), msg, strlen(msg));
+    enc_len = encrypt_message(enc, pub, strlen(pub), msg, strlen(msg));
     encstr = OPENSSL_buf2hexstr(enc, enc_len);
 
-    dec_len = DecryptMessage(dec, priv, enc, enc_len);
+    dec_len = decrypt_message(dec, priv, enc, enc_len);
     dec[dec_len] = '\0';
 
-    printf("original:  %s\n", msg);
-    printf("encrypted:\n%s\n", encstr);
+ //   printf("original:  %s\n", msg);
+ //   printf("encrypted:\n%s\n", encstr);
     printf("decrypted: %s\n", dec);
 
     cleanup();
