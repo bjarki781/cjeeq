@@ -33,7 +33,7 @@ static BIGNUM *order;
 #define COMPR_PUBLIC_KEY_LEN    33
 #define UNCOMPR_PUBLIC_KEY_LEN  65
 #define CHUNK_SIZE              32
-#define VERSION                 0
+#define VERSION                 0x00
 #define GX_HEX                  "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"
 #define GY_HEX                  "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8"
 #define GCOFACTOR_HEX           "01"
@@ -303,6 +303,7 @@ size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t
     EC_POINT *M = EC_POINT_new(group);
     EC_POINT *T = EC_POINT_new(group);
     EC_POINT *U = EC_POINT_new(group);
+    BN_copy(rand_range, order);
 
     write_public_header(enc, pubkey, pubkey_len);
     int enc_loc = PUBLIC_HEADER_LEN;
@@ -311,7 +312,6 @@ size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t
     // go through each 32byte block and encode it
     for (int i = 0; i < chunk_count; i++)
     {
-        BN_copy(rand_range, order);
         BN_sub_word(rand_range, 1);
         BN_rand_range(rand, rand_range); 
 
@@ -334,7 +334,7 @@ size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t
 
         EC_POINT_point2oct(group, T, POINT_CONVERSION_COMPRESSED, &enc[enc_loc], 33, ctx);
         EC_POINT_point2oct(group, U, POINT_CONVERSION_COMPRESSED, &enc[enc_loc+33], 33, ctx);
-        
+
         enc[enc_loc] = enc[enc_loc] - 2 + (xoffset << 1);
 
         enc_loc += 66;
@@ -384,7 +384,8 @@ size_t decrypt_message(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_l
         memcpy(Tser, &enc[enc_loc], 33);
         memcpy(User, &enc[enc_loc+33], 33);
         xoffset = Tser[0] >> 1;
-        Tser[0] = 2 + (xoffset&1);
+        Tser[0] = 2 + (Tser[0]&1);
+
         EC_POINT_oct2point(group, T, Tser, 33, ctx);
         EC_POINT_oct2point(group, U, User, 33, ctx);
 
@@ -401,7 +402,6 @@ size_t decrypt_message(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_l
         r_loc += CHUNK_SIZE;
         enc_loc += 66;
     }
-
 
     assert(r[0] == '\x00'); 
 
@@ -435,7 +435,7 @@ int main(int argc, char *argv[])
     uint8_t dec[40];
     size_t enc_len, dec_len;
 
-    char *msg = "Seagulls.";
+    char *msg = argv[1];
     char *encstr;
 
     init();
