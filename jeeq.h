@@ -1,3 +1,4 @@
-size_t decrypt_message(uint8_t *, uint8_t *, uint8_t *, size_t);
-size_t encrypt_message(uint8_t *, uint8_t *, size_t, uint8_t *, size_t);
+// vector<uint8_t> EncryptMessage(CPubKey pubkey, vector<bytes> msg)
+// vector<uint8_t> DecryptMessage(PKey privkey, vector<bytes> enc)
+
 
