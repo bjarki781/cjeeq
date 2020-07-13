@@ -18,38 +18,29 @@
 #include <openssl/sha.h>
 #include <openssl/bio.h>
 
-//#include "key.h"
 #include "jeeq.h"
 
 // our secp256k1 curve and bitcoin generator
 static BIO *out;
 static EC_GROUP *group;
 static BN_CTX *ctx;
-static BIGNUM *order;
 
-#define PRIVATE_HEADER_LEN      9
-#define PUBLIC_HEADER_LEN       7
+#define PRIVHEADER_LEN          9
+#define PUBHEADER_LEN           7
 #define PRIV_KEY_LEN            32
-#define COMPR_PUBLIC_KEY_LEN    33
-#define UNCOMPR_PUBLIC_KEY_LEN  65
+#define COMPR_PUBKEY_LEN        33
+#define UNCOMPR_PUBKEY_LEN      65
 #define CHUNK_SIZE              32
 #define VERSION                 0x00
 #define GX_HEX                  "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"
 #define GY_HEX                  "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8"
-#define GCOFACTOR_HEX           "01"
 #define GORDER_HEX              "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
-
-int printn(uint8_t *str, int n)
-{
-    for (int i = 0; i < n; i++)
-        putchar(str[i]);
-    puts("");
-}
+#define GCOFACTOR_HEX           "01"
 
 int init()
 {
     BIGNUM *cofactor;
-//    BIGNUM *order;
+    BIGNUM *order;
     EC_POINT *generator;
 
     ctx = BN_CTX_new();
@@ -91,7 +82,7 @@ int cleanup()
     return 1;
 }
 
-// return private header on the form [version,1][length of checksum,2][checksum,6]
+// return private header on the form [version,1][length of len+checksum,2][len,4][checksum,2]
     static uint8_t *write_private_header(uint8_t *ret, uint8_t *nmsg, uint32_t msg_length)
 {
     uint8_t hash[SHA256_DIGEST_LENGTH];
@@ -126,8 +117,10 @@ static uint8_t *write_public_header(uint8_t *ret, uint8_t *pub, int32_t pub_leng
     return ret;
 }
 
+// take in the raw decoded string and read the header to ensure we decoded
+// it correctly.
 // return the message's length
-static uint32_t read_private_header(uint8_t *str, BIGNUM* bn_prvkey, uint16_t pubkey_checksum)
+static size_t read_private_header(uint8_t *str)
 {
     assert(str[0] == VERSION);
     assert(str[1] == 0x00);
@@ -136,42 +129,62 @@ static uint32_t read_private_header(uint8_t *str, BIGNUM* bn_prvkey, uint16_t pu
     uint32_t msg_length = be32toh(*(uint32_t*)&str[3]);
     uint16_t msg_hash = *(uint16_t*)&str[7];
 
-    EC_POINT *pubkey_point = EC_POINT_new(group);
-    EC_POINT_mul(group, pubkey_point, bn_prvkey, NULL, NULL, ctx);
+    uint8_t mg[SHA256_DIGEST_LENGTH];
+    SHA256(str+PRIVHEADER_LEN, msg_length, mg);
 
-    uint8_t *pubkey_compressed = OPENSSL_malloc(COMPR_PUBLIC_KEY_LEN);
-    EC_POINT_point2oct(group, pubkey_point, POINT_CONVERSION_COMPRESSED, pubkey_compressed, COMPR_PUBLIC_KEY_LEN, ctx);
+    assert(msg_hash == *(uint16_t*)mg);
 
-    uint8_t *pubkey_uncompressed = OPENSSL_malloc(UNCOMPR_PUBLIC_KEY_LEN);
-    EC_POINT_point2oct(group, pubkey_point, POINT_CONVERSION_UNCOMPRESSED, pubkey_uncompressed, UNCOMPR_PUBLIC_KEY_LEN, ctx);
 
-    uint8_t comppub_hash[SHA256_DIGEST_LENGTH];
-    SHA256(pubkey_compressed, COMPR_PUBLIC_KEY_LEN, comppub_hash);
-    uint16_t comppub_checksum = *((uint16_t*)comppub_hash);
-
-    uint8_t uncomppub_hash[SHA256_DIGEST_LENGTH];
-    SHA256(pubkey_uncompressed, UNCOMPR_PUBLIC_KEY_LEN, uncomppub_hash);
-    uint16_t uncomppub_checksum = *((uint16_t*)uncomppub_hash);
-
-    assert(uncomppub_checksum == pubkey_checksum || comppub_checksum == pubkey_checksum);
-
-    OPENSSL_free(pubkey_compressed);
-    OPENSSL_free(pubkey_uncompressed);
-    EC_POINT_free(pubkey_point);
+    return msg_length;
 }
 
-// take in the encoded byte vector and return the pubkey checksum
-static uint16_t read_public_header(uint8_t *enc)
+// take in the encoded byte vector and our privkey and check wether
+// our derived pubkey matches the pubkey given in the header
+// return 1 on success
+static int read_public_header(uint8_t *enc, BIGNUM* bn_prvkey)
 {
     assert(enc[0] == 0x6a);
     assert(enc[1] == 0x6a);
     assert(enc[2] == VERSION);
     assert(enc[3] == 0x00);
     assert(enc[4] == 0x02);
+    uint16_t pubkey_checksum = *(uint16_t*)&enc[5];
 
-    return *(uint16_t*)&enc[5];
+    // derive both pubkeys from privkey and check that either matches the key
+    // hashed in the public header
+    {
+        EC_POINT *pubkey_point = EC_POINT_new(group);
+        EC_POINT_mul(group, pubkey_point, bn_prvkey, NULL, NULL, ctx);
+
+        uint8_t *pubkey_compressed = OPENSSL_malloc(COMPR_PUBLIC_KEY_LEN);
+        EC_POINT_point2oct(group, pubkey_point, POINT_CONVERSION_COMPRESSED, pubkey_compressed, COMPR_PUBLIC_KEY_LEN, ctx);
+
+        uint8_t *pubkey_uncompressed = OPENSSL_malloc(UNCOMPR_PUBLIC_KEY_LEN);
+        EC_POINT_point2oct(group, pubkey_point, POINT_CONVERSION_UNCOMPRESSED, pubkey_uncompressed, UNCOMPR_PUBLIC_KEY_LEN, ctx);
+
+        uint8_t comppub_hash[SHA256_DIGEST_LENGTH];
+        SHA256(pubkey_compressed, COMPR_PUBLIC_KEY_LEN, comppub_hash);
+        uint16_t comppub_checksum = *((uint16_t*)comppub_hash);
+
+        uint8_t uncomppub_hash[SHA256_DIGEST_LENGTH];
+        SHA256(pubkey_uncompressed, UNCOMPR_PUBLIC_KEY_LEN, uncomppub_hash);
+        uint16_t uncomppub_checksum = *((uint16_t*)uncomppub_hash);
+
+        assert(uncomppub_checksum == pubkey_checksum || comppub_checksum == pubkey_checksum);
+
+        OPENSSL_free(pubkey_compressed);
+        OPENSSL_free(pubkey_uncompressed);
+        EC_POINT_free(pubkey_point);
+    }
+    
+    return 1;
 }
 
+// since not every x has a corresponding y on the curve (don't know the math)
+// we try first whether the x works by itself, if not we increment to it until
+// we find a y that works. this offset is put in the first byte of the point,
+// the first bit tells us whether the pubkey was compressed or uncompressed
+// and the rest includes the offset to x needed to find an y.
 static int y_from_x(BIGNUM *y, size_t *offset, BIGNUM *x, const bool odd)
 {
     EC_POINT *M = EC_POINT_new(group);
@@ -196,7 +209,7 @@ static int y_from_x(BIGNUM *y, size_t *offset, BIGNUM *x, const bool odd)
     BIGNUM *My2 = BN_new();
     BIGNUM *aMx2 = BN_new();
 
-    BIGNUM *half = BN_dup(p); // by putting a bignum into the special half power we get a square root
+    BIGNUM *half = BN_dup(p);
     BN_add_word(half, 1); 
     BN_div_word(half, 4);
 
@@ -261,36 +274,35 @@ static int y_from_x(BIGNUM *y, size_t *offset, BIGNUM *x, const bool odd)
 }
 
 
-// enc needs to be of size PUBLIC_HEADER_LEN + 66*chunk_count
+// enc needs to be of size PUBHEADER_LEN + 66*chunk_count
 // return how many bytes written
-size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t *msg, size_t msg_len)
+size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, uint8_t *msg, size_t msg_len)
 {
-    assert(pubkey_len == COMPR_PUBLIC_KEY_LEN || pubkey_len == UNCOMPR_PUBLIC_KEY_LEN);
-    assert(pubkey[0] == '\x02' || pubkey[0] == '\x3' || pubkey[0] == '\x04');
+    assert(pubkey[0] == 0x02 || pubkey[0] == 0x03 || pubkey[0] == 0x04);
 
     EC_POINT *pk = EC_POINT_new(group);
 
     // get so many blocks of 32B blocks that msg will fit
     // could be done with shifting but who cares
-    int chunk_count = (PRIVATE_HEADER_LEN + msg_len)/CHUNK_SIZE + 1;
+    int chunk_count = (PRIVHEADER_LEN + msg_len)/CHUNK_SIZE + 1;
 
     uint8_t *m = OPENSSL_zalloc(chunk_count * CHUNK_SIZE);
 
     write_private_header(m, msg, msg_len);
-    memcpy(&m[PRIVATE_HEADER_LEN], msg, msg_len);
+    memcpy(&m[PRIVHEADER_LEN], msg, msg_len);
 
     BIGNUM *bn_pubkey = BN_new();
     BN_bin2bn(&pubkey[1], 32, bn_pubkey);
 
-    if (pubkey_len == 33)
+    if (pubkey[0] == 0x02 || pubkey[0] == 0x03)
     {
-        EC_POINT_set_compressed_coordinates_GFp(group, pk, bn_pubkey, pubkey[0]=='\x03', ctx);
+        EC_POINT_set_compressed_coordinates_GFp(group, pk, bn_pubkey, pubkey[0]==0x03, ctx);
     }
-    else if (pubkey_len == 65)
+    else if (pubkey[0] == 0x04)
     {
         BIGNUM *bn_pubkey_extra = BN_new();
 
-        BN_bin2bn(&pubkey[33], 32, bn_pubkey_extra);
+        BN_bin2bn(&pubkey[1+32], 32, bn_pubkey_extra);
         EC_POINT_set_affine_coordinates_GFp(group, pk, bn_pubkey, bn_pubkey_extra, ctx);
 
         BN_free(bn_pubkey_extra);
@@ -303,21 +315,20 @@ size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t
     EC_POINT *M = EC_POINT_new(group);
     EC_POINT *T = EC_POINT_new(group);
     EC_POINT *U = EC_POINT_new(group);
-    BN_copy(rand_range, order);
+    EC_GROUP_get_order(group, rand_range, ctx);
+    BN_sub_word(rand_range, 1);
 
     write_public_header(enc, pubkey, pubkey_len);
-    int enc_loc = PUBLIC_HEADER_LEN;
+    int enc_loc = PUBHEADER_LEN;
     size_t xoffset = 0;
 
     // go through each 32byte block and encode it
     for (int i = 0; i < chunk_count; i++)
     {
-        BN_sub_word(rand_range, 1);
-        BN_rand_range(rand, rand_range); 
 
         // since rand must be in [1,...,q-1]
+        BN_rand_range(rand, rand_range); 
         BN_add_word(rand, 1);
-        //BN_mod(rand, rand, norder, ctx);
 
         BN_bin2bn(&m[i*CHUNK_SIZE], CHUNK_SIZE, Mx);
 
@@ -332,16 +343,19 @@ size_t encrypt_message(uint8_t *enc, uint8_t *pubkey, size_t pubkey_len, uint8_t
         EC_POINT_mul(group, U, NULL, pk, rand, ctx);
         EC_POINT_add(group, U, U, M, ctx);
 
-        EC_POINT_point2oct(group, T, POINT_CONVERSION_COMPRESSED, &enc[enc_loc], 33, ctx);
-        EC_POINT_point2oct(group, U, POINT_CONVERSION_COMPRESSED, &enc[enc_loc+33], 33, ctx);
+        EC_POINT_point2oct(group, T, POINT_CONVERSION_COMPRESSED, 
+                &enc[enc_loc], COMPR_PUBKEY_LEN, ctx);
+        EC_POINT_point2oct(group, U, POINT_CONVERSION_COMPRESSED, 
+                &enc[enc_loc+COMPR_PUBKEY_LEN], COMPR_PUBKEY_LEN, ctx);
 
         enc[enc_loc] = enc[enc_loc] - 2 + (xoffset << 1);
 
-        enc_loc += 66;
+        enc_loc += 2*COMPR_PUBKEY_LEN;
     }
 
     OPENSSL_clear_free(m, chunk_count * CHUNK_SIZE);
     BN_free(rand);
+    BN_free(rand_range);
     BN_free(Mx);
     BN_free(My);
     BN_free(bn_pubkey);
@@ -359,12 +373,14 @@ size_t decrypt_message(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_l
     BIGNUM *bn_prvkey = BN_new();
     BN_bin2bn(prvkey, PRIV_KEY_LEN, bn_prvkey);
 
-    int chunk_count = (enc_len - PUBLIC_HEADER_LEN) / 66;
+    uint16_t pubkeycheck = read_public_header(enc, bn_prvkey);
 
-    uint8_t *r = OPENSSL_malloc(chunk_count * 32);
+    int chunk_count = (enc_len - PUBHEADER_LEN) / (2*COMPR_PUBKEY_LEN);
 
-    uint8_t *Tser = OPENSSL_zalloc(33);
-    uint8_t *User = OPENSSL_zalloc(33);
+    uint8_t *r = OPENSSL_malloc(chunk_count * CHUNK_SIZE);
+
+    uint8_t *Tser = OPENSSL_zalloc(COMPR_PUBKEY_LEN);
+    uint8_t *User = OPENSSL_zalloc(COMPR_PUBKEY_LEN);
     int xoffset = 0;
 
     EC_POINT *T = EC_POINT_new(group);
@@ -374,20 +390,17 @@ size_t decrypt_message(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_l
 
     BIGNUM *Mx = BN_new();
 
-    // assume that there is an subgroup order
-    //BN_mod(bn_prvkey, bn_prvkey, norder, ctx);
-
-    int enc_loc = PUBLIC_HEADER_LEN;
+    int enc_loc = PUBHEADER_LEN;
     int r_loc = 0;
     for (int i = 0; i < chunk_count; i++)
     {
-        memcpy(Tser, &enc[enc_loc], 33);
-        memcpy(User, &enc[enc_loc+33], 33);
+        memcpy(Tser, &enc[enc_loc], COMPR_PUBKEY_LEN);
+        memcpy(User, &enc[enc_loc+COMPR_PUBKEY_LEN], COMPR_PUBKEY_LEN);
         xoffset = Tser[0] >> 1;
         Tser[0] = 2 + (Tser[0]&1);
 
-        EC_POINT_oct2point(group, T, Tser, 33, ctx);
-        EC_POINT_oct2point(group, U, User, 33, ctx);
+        EC_POINT_oct2point(group, T, Tser, COMPR_PUBKEY_LEN, ctx);
+        EC_POINT_oct2point(group, U, User, COMPR_PUBKEY_LEN, ctx);
 
         EC_POINT_mul(group, V, NULL, T, bn_prvkey, ctx);
         EC_POINT_invert(group, V, ctx);
@@ -400,31 +413,29 @@ size_t decrypt_message(uint8_t *msg, uint8_t *prvkey, uint8_t *enc, size_t enc_l
         BN_bn2binpad(Mx, &r[r_loc], CHUNK_SIZE);
 
         r_loc += CHUNK_SIZE;
-        enc_loc += 66;
+        enc_loc += 2*COMPR_PUBKEY_LEN;
     }
 
-    assert(r[0] == '\x00'); 
+    OPENSSL_free(Tser);
+    OPENSSL_free(User);
 
-    uint16_t pvh_len = be16toh(*(uint16_t*)(r+1));
-    assert(pvh_len != 0);
-    uint8_t *pvh = OPENSSL_malloc(pvh_len);
-    memcpy(pvh, r+3, pvh_len);
-    uint8_t size[4];
-    size[3] = 0;
-    size[2] = pvh[1];
-    size[1] = pvh[2];
-    size[0] = pvh[3];
+    EC_POINT_free(V);
+    EC_POINT_free(U);
+    EC_POINT_free(M);
+    EC_POINT_free(T);
 
-    int32_t s = *(uint32_t*)size;
+    OPENSSL_free(r);
 
-    uint16_t checksum = *(uint16_t*)(pvh + 4);
-    memcpy(msg, r+3+pvh_len, s);
-    uint8_t msghash[SHA256_DIGEST_LENGTH];
-    SHA256(msg, s, msghash);
-    assert(checksum == *((uint16_t*)msghash));
+    BN_free(bn_prvkey);
+
+    size_t s = read_private_header(r, bn_prvkey, pubkeycheck);
+    memcpy(msg, &r[PRIVHEADER_LEN], s);
 
     return s;
 }
+
+// vector<uint8_t> EncryptMessage(CPubKey pubkey, vector<bytes> msg)
+// vector<uint8_t> DecryptMessage(PKey privkey, vector<bytes> enc)
 
 int main(int argc, char *argv[])
 {
@@ -446,8 +457,8 @@ int main(int argc, char *argv[])
     dec_len = decrypt_message(dec, priv, enc, enc_len);
     dec[dec_len] = '\0';
 
- //   printf("original:  %s\n", msg);
- //   printf("encrypted:\n%s\n", encstr);
+    printf("original:  %s\n", msg);
+    printf("encrypted:\n%s\n", encstr);
     printf("decrypted: %s\n", dec);
 
     cleanup();
