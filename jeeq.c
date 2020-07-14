@@ -75,6 +75,7 @@ int init()
     BN_free(Gy);
     BN_free(order);
     BN_free(cofactor);
+    EC_POINT_free(generator);
     
     return 1;
 }
@@ -283,11 +284,14 @@ err:
     BN_free(p);
     BN_free(a);
     BN_free(b);
+
     BN_free(Mx);
     BN_free(My);
     BN_free(My2);
     BN_free(aMx2);
     BN_free(half);
+
+    EC_POINT_free(M);
 
     return ret;
 }
@@ -459,6 +463,7 @@ static size_t decrypt_message(uint8_t *msg, uint8_t *privkey, uint8_t *enc, size
     EC_POINT_clear_free(T);
 
     BN_clear_free(bn_privkey);
+    BN_free(Mx);
 
     size_t s = 0;
     if (read_private_header(r, &s) == 0) return 0;
