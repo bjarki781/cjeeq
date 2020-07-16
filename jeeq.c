@@ -16,13 +16,12 @@
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
-#include <openssl/bio.h>
+#include <openssl/err.h>
 
 #include "jeeq.h"
 
 /* our secp256k1 curve and bitcoin generator
  */
-static BIO *out;
 static EC_GROUP *group;
 static BN_CTX *ctx;
 
@@ -397,6 +396,16 @@ err:
     EC_POINT_free(U);
     EC_POINT_free(pk);
 
+    if (ERR_peek_error())
+    {
+        unsigned long e = 0;
+        while (e = ERR_get_error())
+        {
+            char *error = ERR_error_string(e, NULL);
+            puts(error);
+        }
+    }
+
     return ret;
 }
 
@@ -471,6 +480,16 @@ static size_t decrypt_message(uint8_t *msg, uint8_t *privkey, uint8_t *enc, size
 
     OPENSSL_clear_free(r, r_loc);
 
+    if (ERR_peek_error())
+    {
+        unsigned long e = 0;
+        while (e = ERR_get_error())
+        {
+            char *error = ERR_error_string(e, NULL);
+            puts(error);
+        }
+    }
+
     return s;
 }
 
@@ -502,4 +521,5 @@ int main(int argc, char *argv[])
 
     return 0;
 }
+
 
